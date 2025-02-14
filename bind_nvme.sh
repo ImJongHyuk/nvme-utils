@@ -1,7 +1,13 @@
 #!/bin/bash
-# Usage: 
-#   Binding mode: sudo ./bind_nvme.sh -m {vfio|kernel} [-f /path/to/nvme_devices.yml]
-#   Status mode:  sudo ./bind_nvme.sh status [-f /path/to/nvme_devices.yml]
+# bind_nvme.sh
+
+set -e
+set -u
+
+# Logging functions
+error() { echo "Err: $1" >&2; exit 1; }
+info()  { echo "$1"; }
+debug() { [ "${DEBUG:-0}" -ne 0 ] && echo "Dbg: $1"; }
 
 usage() {
   echo "Usage:"
@@ -10,10 +16,11 @@ usage() {
   exit 1
 }
 
+# Default options
 method="vfio"
 YAML_FILE="nvme_devices.yml"
 
-if [ "$1" == "status" ]; then
+if [ "${1-}" = "status" ]; then
   shift
   while getopts "f:" opt; do
     case $opt in
@@ -21,13 +28,13 @@ if [ "$1" == "status" ]; then
       *) usage ;;
     esac
   done
-  
+
   status() {
-    command -v yq &>/dev/null || { echo "yq missing."; exit 1; }
-    [ -f "$YAML_FILE" ] || { echo "YAML not found: $YAML_FILE"; exit 1; }
-    
+    command -v yq >/dev/null || error "yq not found (https://github.com/mikefarah/yq)"
+    [ -f "$YAML_FILE" ] || error "YAML not found: $YAML_FILE"
+
     count=$(yq e '.nvme_devices | length' "$YAML_FILE")
-    echo "Total NVMe devices: $count"
+    info "Total NVMe devices: $count"
     for (( i=0; i<count; i++ )); do
       pci=$(yq e ".nvme_devices[$i].pci" "$YAML_FILE")
       driver_path="/sys/bus/pci/devices/$pci/driver"
@@ -36,15 +43,15 @@ if [ "$1" == "status" ]; then
       else
         drv="none"
       fi
-      echo "Device $pci is bound to driver: $drv"
+      info "Device $pci is bound to driver: $drv"
     done
   }
-  
+
   status
   exit 0
 fi
 
-# Option parsing
+# Option parsing for binding mode
 while getopts "m:f:" opt; do
   case $opt in
     m) method="$OPTARG" ;;
@@ -57,23 +64,13 @@ if [[ "$method" != "vfio" && "$method" != "kernel" ]]; then
   usage
 fi
 
-command -v yq &>/dev/null || { echo "yq missing."; exit 1; }
-[ -f "$YAML_FILE" ] || { echo "YAML not found: $YAML_FILE"; exit 1; }
+command -v yq >/dev/null || error "yq not found (https://github.com/mikefarah/yq)"
+[ -f "$YAML_FILE" ] || error "YAML not found: $YAML_FILE"
 
 count=$(yq e '.nvme_devices | length' "$YAML_FILE")
 if [ "$count" -eq 0 ]; then
-  echo "No devices."
-  exit 1
+  error "No devices."
 fi
-
-info() {
-  echo "INFO: $1"
-}
-
-error() {
-  echo "ERROR: $1" >&2
-  exit 1
-}
 
 bind_vfio() {
   local pci="$1"
@@ -88,7 +85,7 @@ bind_vfio() {
   if [ "$cur_driver" != "none" ]; then
     local unbind_path="/sys/bus/pci/drivers/$cur_driver/unbind"
     if [ -f "$unbind_path" ]; then
-      echo "$pci" | sudo tee "$unbind_path" > /dev/null
+      echo "$pci" | sudo tee "$unbind_path" >/dev/null
       info "Unbound $pci from $cur_driver"
     else
       info "Unbind path for $pci not found"
@@ -99,14 +96,14 @@ bind_vfio() {
 
   local override_path="/sys/bus/pci/devices/$pci/driver_override"
   if [ -f "$override_path" ]; then
-    echo "vfio-pci" | sudo tee "$override_path" > /dev/null
-    echo "$pci" | sudo tee /sys/bus/pci/drivers_probe > /dev/null
+    echo "vfio-pci" | sudo tee "$override_path" >/dev/null
+    echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
     info "Bound $pci to vfio-pci"
   else
     info "driver_override missing; using manual binding"
     local bind_path="/sys/bus/pci/drivers/vfio-pci/bind"
     if [ -f "$bind_path" ]; then
-      echo "$pci" | sudo tee "$bind_path" > /dev/null
+      echo "$pci" | sudo tee "$bind_path" >/dev/null
       info "Manually bound $pci to vfio-pci"
     else
       error "No binding mechanism for $pci"
@@ -141,7 +138,7 @@ bind_kernel() {
   fi
 
   if [ -n "$unbind_path" ] && [ -f "$unbind_path" ]; then
-    echo "$pci" | sudo tee "$unbind_path" > /dev/null
+    echo "$pci" | sudo tee "$unbind_path" >/dev/null
     info "Unbound $pci from $cur_driver"
   else
     info "No unbind required for $pci"
@@ -149,7 +146,7 @@ bind_kernel() {
 
   local override_path="/sys/bus/pci/devices/$pci/driver_override"
   if [ -f "$override_path" ]; then
-    echo "nvme" | sudo tee "$override_path" > /dev/null
+    echo "nvme" | sudo tee "$override_path" >/dev/null
     info "Set driver_override to nvme for $pci"
   else
     info "driver_override missing for $pci"
@@ -157,7 +154,7 @@ bind_kernel() {
 
   sudo modprobe nvme
 
-  echo "$pci" | sudo tee /sys/bus/pci/drivers_probe > /dev/null
+  echo "$pci" | sudo tee /sys/bus/pci/drivers_probe >/dev/null
   info "Bound $pci to nvme"
 
   sleep 1
@@ -171,10 +168,14 @@ bind_kernel() {
 }
 
 for (( i=0; i<count; i++ )); do
+  local pci
   pci=$(yq e ".nvme_devices[$i].pci" "$YAML_FILE")
+  local mount_point
   mount_point=$(yq e ".nvme_devices[$i].mount" "$YAML_FILE")
 
-  mountpoint -q "$mount_point" && sudo umount "$mount_point"
+  if mountpoint -q "$mount_point"; then
+    sudo umount "$mount_point"
+  fi
 
   if [ "$method" = "vfio" ]; then
     bind_vfio "$pci"

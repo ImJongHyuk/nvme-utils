@@ -167,23 +167,27 @@ bind_kernel() {
   fi
 }
 
-for (( i=0; i<count; i++ )); do
-  local pci
-  pci=$(yq e ".nvme_devices[$i].pci" "$YAML_FILE")
-  local mount_point
-  mount_point=$(yq e ".nvme_devices[$i].mount" "$YAML_FILE")
+bind_devices() {
+  for (( i=0; i<count; i++ )); do
+    local pci
+    pci=$(yq e ".nvme_devices[$i].pci" "$YAML_FILE")
+    local mount_point
+    mount_point=$(yq e ".nvme_devices[$i].mount" "$YAML_FILE")
 
-  if mountpoint -q "$mount_point"; then
-    sudo umount "$mount_point"
-  fi
+    if mountpoint -q "$mount_point"; then
+      sudo umount "$mount_point"
+    fi
 
-  if [ "$method" = "vfio" ]; then
-    bind_vfio "$pci"
-  else
-    bind_kernel "$pci"
-  fi
+    if [ "$method" = "vfio" ]; then
+      bind_vfio "$pci"
+    else
+      bind_kernel "$pci"
+    fi
 
-  info "Processed: $pci"
-done
+    info "Processed: $pci"
+  done
+}
+
+bind_devices
 
 info "Done."
